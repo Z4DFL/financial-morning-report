@@ -1,0 +1,20 @@
+name: Morning Report
+
+on:
+  schedule:
+    # UTC 01:00 = 北京时间 09:00
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run morning report
+        run: node morning-report.js
+        env:
+          SENDKEY: ${{ secrets.SENDKEY }}
