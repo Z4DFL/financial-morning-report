@@ -47,18 +47,93 @@ async function fetchSina(codes) {
   return result;
 }
 
+// ---- 品种配置 ----
+
+const INDEX_CODES = [
+  "s_sh000001,s_sh000300,s_sh000016,s_sz399001,s_sz399006,s_sh000905,s_sh000688",
+];
+
+const FOREX_PAIRS = {
+  fx_susdcny: { name: "美元/人民币", ticker: "USDCNY", decimals: 4 },
+  fx_seurusd: { name: "欧元/美元", ticker: "EURUSD", decimals: 4 },
+  fx_sjpycny: { name: "日元/人民币", ticker: "JPYCNY", decimals: 5 },
+  fx_sgbpusd: { name: "英镑/美元", ticker: "GBPUSD", decimals: 4 },
+  fx_seurcny: { name: "欧元/人民币", ticker: "EURCNY", decimals: 4 },
+  fx_susdhkd: { name: "美元/港元", ticker: "USDHKD", decimals: 4 },
+};
+
+const INTL_COMMODITIES = [
+  { code: "hf_XAG", key: "hf_XAG", name: "伦敦银", unit: "美元" },
+  { code: "hf_HG", key: "hf_HG", name: "COMEX铜", unit: "美元" },
+  { code: "hf_CL", key: "hf_CL", name: "WTI 原油", unit: "美元" },
+  { code: "hf_OIL", key: "hf_OIL", name: "布伦特原油", unit: "美元" },
+];
+
+// ---- 新闻质量配置 ----
+
+const CLICKBAIT_PATTERNS = [
+  /震惊/, /刚刚/, /突发/, /紧急/, /重磅/, /速看/, /不看后悔/,
+  /惊呆了/, /出大事/, /炸裂/, /疯传/, /一夜暴/,
+  /史诗级/, /恐怖/, /骇人/, /必读/, /赶紧/, /马上/,
+  /揭秘/, /内幕/, /真相/, /竟然/, /想不到/,
+  /注意了/, /定了/, /官宣了/, /终于/, /别错过/, /不要再/,
+  /超级/, /极致/, /逆天/, /看呆了/, /说中了/,
+];
+
+const MEDIA_AUTHORITY = {
+  "新华社": 5, "央视新闻": 5, "人民日报": 5, "央视网": 5, "新华网": 5,
+  "证券时报": 4, "上海证券报": 4, "中国证券报": 4, "证券日报": 4,
+  "经济参考报": 4, "中证网": 4, "中新社": 4, "中新网": 4,
+  "第一财经": 3, "21世纪经济报道": 3, "经济观察报": 3, "经济日报": 3,
+  "每日经济新闻": 3, "界面新闻": 3, "华尔街见闻": 3,
+  "财联社": 3, "中国基金报": 3, "澎湃新闻": 3,
+  "券商中国": 3, "中国经营报": 3, "金融界": 3,
+  "新浪财经": 2, "东方财富": 2, "和讯网": 2, "36氪": 2,
+  "腾讯财经": 2, "网易财经": 2, "凤凰财经": 2, "腾讯新闻": 2,
+};
+
+// 金融相关关键词，用于筛选财经新闻
+const FINANCE_KEYWORDS = [
+  "股", "市", "基金", "债", "汇", "央行", "美联储", "IPO",
+  "A股", "港股", "美股", "指数", "板块", "涨停", "跌停",
+  "经济", "GDP", "CPI", "PMI", "通胀", "利率", "降息", "加息",
+  "黄金", "原油", "商品", "期货", "期权", "外汇", "人民币",
+  "银行", "券商", "保险", "信托", "监管", "证监会", "银保监",
+  "科技", "芯片", "新能源", "汽车", "房地产", "医药", "消费",
+  "业绩", "财报", "营收", "利润", "分红", "回购", "收购",
+  "上市", "融资", "投资", "估值", "目标价", "评级",
+];
+
+const NEWS_FETCH_COUNT = 80;
+const NEWS_OUTPUT_COUNT = 8;
+
+// ---- 新闻过滤函数 ----
+
+function isClickbait(title) {
+  if (!title) return true;
+  return CLICKBAIT_PATTERNS.some((p) => p.test(title));
+}
+
+function mediaScore(name) {
+  if (!name) return 0;
+  for (const [key, score] of Object.entries(MEDIA_AUTHORITY)) {
+    if (name.includes(key)) return score;
+  }
+  return 0;
+}
+
 // ---- 数据获取 ----
 
 async function fetchIndices() {
-  const data = await fetchSina("s_sh000001,s_sz399001,s_sz399006,s_sh000688");
-  const order = ["s_sh000001", "s_sz399001", "s_sz399006", "s_sh000688"];
+  const data = await fetchSina(INDEX_CODES[0]);
+  const order = INDEX_CODES[0].split(",");
   return order
-    .map((key) => {
-      const f = data[key];
+    .map((code) => {
+      const f = data[code];
       if (!f) return null;
       return {
         name: f[0],
-        code: key,
+        code,
         price: parseFloat(f[1]) || 0,
         changePct: parseFloat(f[3]) || 0,
         changeAmt: parseFloat(f[2]) || 0,
@@ -68,72 +143,136 @@ async function fetchIndices() {
 }
 
 async function fetchForexData() {
-  const data = await fetchSina("fx_susdcny,fx_seurusd,fx_sjpycny");
-  const nameMap = {
-    fx_susdcny: "美元/人民币",
-    fx_seurusd: "欧元/美元",
-    fx_sjpycny: "日元/人民币",
-  };
-  const codeMap = { fx_susdcny: "USDCNY", fx_seurusd: "EURUSD", fx_sjpycny: "JPYCNY" };
+  const codes = Object.keys(FOREX_PAIRS).join(",");
+  const data = await fetchSina(codes);
 
-  return Object.entries(data).map(([key, fields]) => ({
-    name: nameMap[key] || fields[9],
-    code: codeMap[key] || key,
-    price: parseFloat(fields[1]) || 0,
-    changePct: parseFloat(fields[11]) || 0,
-    changeAmt: parseFloat(fields[10]) || 0,
-  }));
-}
-
-async function fetchCommodityData() {
-  const data = await fetchSina("hf_XAU,hf_CL,hf_OIL");
-  const nameMap = { XAUUSD: "伦敦金", CL: "WTI 原油", OIL: "布伦特原油" };
-
-  return [
-    { key: "XAUUSD", ...data.hf_XAU },
-    { key: "CL", ...data.hf_CL },
-    { key: "OIL", ...data.hf_OIL },
-  ].map(({ key, ...fields }) => {
-    const f = Object.values(fields);
-    const hasPrevClose = f[1] != null && f[1].trim() !== "";
-    const rawPrev = parseFloat(f[1]);
-    const price = parseFloat(f[0]) || 0;
-
+  return Object.entries(data).map(([key, fields]) => {
+    const cfg = FOREX_PAIRS[key] || {};
     return {
-      name: f[13] || nameMap[key] || key,
-      code: key,
-      price,
-      prevClose: hasPrevClose ? rawPrev : NaN,
-      changePct: hasPrevClose && rawPrev !== 0 ? ((price - rawPrev) / rawPrev * 100) : NaN,
-      changeAmt: hasPrevClose ? price - rawPrev : NaN,
+      name: cfg.name || fields[9] || key,
+      code: cfg.ticker || key,
+      decimals: cfg.decimals || 4,
+      price: parseFloat(fields[1]) || 0,
+      changePct: parseFloat(fields[11]) || 0,
+      changeAmt: parseFloat(fields[10]) || 0,
     };
   });
 }
 
+async function fetchCommodityData() {
+  // 国内期货和海外期货分开请求
+  const [domesticData, intlData] = await Promise.all([
+    fetchSina("nf_AU0"),
+    fetchSina(INTL_COMMODITIES.map((c) => c.code).join(",")),
+  ]);
+
+  const commodities = [];
+
+  // 沪金连续 (nf_AU0) — 国内期货格式
+  const nfFields = domesticData["nf_AU0"];
+  if (nfFields && nfFields.length > 7) {
+    const name = "沪金连续";
+    const rawPrice = parseFloat(nfFields[7]);
+    const price = isNaN(rawPrice) ? 0 : rawPrice;
+    const prevSettle = parseFloat(nfFields[4]) || NaN;
+    const hasPrev = !isNaN(prevSettle) && prevSettle > 0;
+    commodities.push({
+      name,
+      code: "AU0",
+      price,
+      prevClose: hasPrev ? prevSettle : NaN,
+      changePct: hasPrev ? ((price - prevSettle) / prevSettle * 100) : NaN,
+      changeAmt: hasPrev ? price - prevSettle : NaN,
+      unit: "元/克",
+    });
+    console.log(`nf_AU0 字段: name=${name} price=${price} prevSettle=${prevSettle}`);
+  } else {
+    console.log("nf_AU0 数据为空，可能非交易时段");
+    commodities.push({
+      name: "沪金连续",
+      code: "AU0",
+      price: 0,
+      prevClose: NaN,
+      changePct: NaN,
+      changeAmt: NaN,
+      unit: "元/克",
+    });
+  }
+
+  // 海外期货 (hf_ 格式)
+  for (const cfg of INTL_COMMODITIES) {
+    const f = intlData[cfg.key];
+    if (!f) continue;
+    const hasPrevClose = f[1] != null && f[1].trim() !== "";
+    const rawPrev = parseFloat(f[1]);
+    const price = parseFloat(f[0]) || 0;
+    commodities.push({
+      name: cfg.name,
+      code: cfg.code,
+      price,
+      prevClose: hasPrevClose ? rawPrev : NaN,
+      changePct: hasPrevClose && rawPrev !== 0 ? ((price - rawPrev) / rawPrev * 100) : NaN,
+      changeAmt: hasPrevClose ? price - rawPrev : NaN,
+      unit: cfg.unit,
+    });
+  }
+
+  return commodities;
+}
+
 async function fetchNews() {
-  const url =
-    "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=50&page=1";
+  const url = `https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=${NEWS_FETCH_COUNT}&page=1`;
 
   const res = await fetchWithRetry(url, {
     headers: { Referer: "https://news.sina.com.cn/roll/", "User-Agent": UA },
   });
   const json = await res.json();
-  const articles = json.result?.data ?? [];
+  let articles = json.result?.data ?? [];
 
-  const today = new Date();
   const todayStart =
-    new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime() / 1000;
+    new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime() / 1000;
 
-  return articles
-    .filter((a) => parseInt(a.ctime) >= todayStart)
-    .slice(0, 10)
-    .map((a) => ({
-      title: a.title,
-      url: a.url,
-      time: new Date(parseInt(a.ctime) * 1000).toLocaleTimeString("zh-CN", { hour12: false }),
-    }))
-    .filter((a, i, arr) => arr.findIndex((x) => x.title === a.title) === i)
-    .slice(0, 10);
+  // 第一层: 今日文章
+  articles = articles.filter((a) => parseInt(a.ctime) >= todayStart);
+
+  // 第二层: 金融相关性过滤
+  articles = articles.filter((a) => {
+    const text = (a.title || "") + (a.keywords || "");
+    return FINANCE_KEYWORDS.some((kw) => text.includes(kw));
+  });
+
+  // 第三层: 标题党过滤
+  articles = articles.filter((a) => !isClickbait(a.title));
+
+  // docid 去重
+  const seen = new Set();
+  articles = articles.filter((a) => {
+    const id = a.docid || a.title;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+
+  // 按媒体权威性降序，同分按时间倒序
+  articles.sort((a, b) => {
+    const sa = mediaScore(a.media_name);
+    const sb = mediaScore(b.media_name);
+    if (sa !== sb) return sb - sa;
+    return parseInt(b.ctime) - parseInt(a.ctime);
+  });
+
+  articles = articles.slice(0, NEWS_OUTPUT_COUNT);
+
+  // 最终按时间正序展示
+  articles.sort((a, b) => parseInt(a.ctime) - parseInt(b.ctime));
+
+  return articles.map((a) => ({
+    title: a.title || "",
+    url: a.url || "",
+    time: new Date(parseInt(a.ctime) * 1000).toLocaleTimeString("zh-CN", { hour12: false }),
+    intro: (a.intro || "").trim(),
+    media: (a.media_name || "").trim(),
+  }));
 }
 
 // ---- 市场概览生成 ----
@@ -142,7 +281,7 @@ function generateOverview(indices, commodities) {
   const up = indices.filter((i) => i.changePct > 0);
   const down = indices.filter((i) => i.changePct < 0);
   const best = indices.reduce((a, b) => (a.changePct > b.changePct ? a : b));
-  const gold = commodities.find((c) => c.code === "XAUUSD");
+  const gold = commodities.find((c) => c.code === "AU0");
   const oil = commodities.find((c) => c.code === "CL");
 
   let overview = "";
@@ -156,19 +295,20 @@ function generateOverview(indices, commodities) {
   }
 
   overview += `${indices.length}大指数中 ${up.length} 涨 ${down.length} 跌，`;
-  overview += `${best.name}表现最佳，${best.changePct > 0 ? "上涨" : "下跌"} ${Math.abs(best.changePct).toFixed(2)}%。`;
+  const dir = best.changePct > 0 ? "上涨" : "下跌";
+  overview += `${best.name}表现最佳，${dir} ${Math.abs(best.changePct).toFixed(2)}%。`;
 
   const lines = [];
   if (gold && !isNaN(gold.changePct)) {
-    const dir = gold.changePct > 0 ? "上涨" : "下跌";
-    lines.push(`伦敦金${dir} ${Math.abs(gold.changePct).toFixed(2)}% 至 ${gold.price.toFixed(0)} 美元`);
-  } else if (gold) {
-    lines.push(`伦敦金报 ${gold.price.toFixed(0)} 美元`);
+    const gdir = gold.changePct > 0 ? "上涨" : "下跌";
+    lines.push(`沪金${gdir} ${Math.abs(gold.changePct).toFixed(2)}% 至 ${gold.price.toFixed(2)} 元/克`);
+  } else if (gold && gold.price > 0) {
+    lines.push(`沪金报 ${gold.price.toFixed(2)} 元/克`);
   }
   if (oil && !isNaN(oil.changePct) && Math.abs(oil.changePct) > 0.01) {
-    const dir = oil.changePct > 0 ? "上涨" : "下跌";
-    lines.push(`WTI 原油${dir} ${Math.abs(oil.changePct).toFixed(2)}% 至 ${oil.price.toFixed(2)} 美元`);
-  } else if (oil) {
+    const odir = oil.changePct > 0 ? "上涨" : "下跌";
+    lines.push(`WTI 原油${odir} ${Math.abs(oil.changePct).toFixed(2)}% 至 ${oil.price.toFixed(2)} 美元`);
+  } else if (oil && oil.price > 0) {
     lines.push(`WTI 原油报 ${oil.price.toFixed(2)} 美元`);
   }
   if (lines.length > 0) {
@@ -202,7 +342,7 @@ function formatReport(indices, forexList, commodities, articles) {
   md += `|------|--------|--------|--------|\n`;
   for (const item of indices) {
     const a = arrow(item.changePct);
-    md += `| ${item.name} | ${item.price.toFixed(2)} | ${a}${item.changePct.toFixed(2)}% | ${item.changeAmt.toFixed(2)} |\n`;
+    md += `| ${item.name} | ${item.price.toFixed(2)} | ${a}${item.changePct.toFixed(2)}% | ${item.changeAmt >= 0 ? "+" : ""}${item.changeAmt.toFixed(2)} |\n`;
   }
 
   md += `\n## 外汇\n\n`;
@@ -210,8 +350,7 @@ function formatReport(indices, forexList, commodities, articles) {
   md += `|--------|--------|--------|\n`;
   for (const item of forexList) {
     const a = arrow(item.changePct);
-    const d = item.code === "JPYCNY" ? 6 : 4;
-    md += `| ${item.name} | ${item.price.toFixed(d)} | ${a}${item.changePct.toFixed(4)}% |\n`;
+    md += `| ${item.name} | ${item.price.toFixed(item.decimals)} | ${a}${item.changePct.toFixed(4)}% |\n`;
   }
 
   md += `\n## 大宗商品\n\n`;
@@ -223,14 +362,18 @@ function formatReport(indices, forexList, commodities, articles) {
       const a = arrow(item.changePct);
       pctStr = `${a}${item.changePct.toFixed(2)}%`;
     }
-    md += `| ${item.name} | ${item.price.toFixed(2)} | ${pctStr} |\n`;
+    md += `| ${item.name} | ${item.price.toFixed(2)} ${item.unit} | ${pctStr} |\n`;
   }
 
   if (articles.length > 0) {
     md += `\n## 今日要闻\n\n`;
     for (let i = 0; i < articles.length; i++) {
       const a = articles[i];
-      md += `${i + 1}. [${a.title}](${a.url}) — ${a.time}\n`;
+      md += `${i + 1}. **${a.title}**`;
+      if (a.media) md += ` — ${a.media}`;
+      md += `\n`;
+      if (a.intro) md += `   > ${a.intro}\n`;
+      md += `   [阅读全文](${a.url})\n\n`;
     }
   }
 
