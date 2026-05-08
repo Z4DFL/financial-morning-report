@@ -9,8 +9,32 @@ const SENDKEY = process.env.SENDKEY || "SCT346359T1ErBbbcPAUM5AZo4fy2pXSpa";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
+const FETCH_TIMEOUT_MS = 15000;
+const MAX_RETRIES = 3;
+
+async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
+  for (let i = 0; i <= retries; i++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+      if (i === retries) throw err;
+      const code = err.cause?.code;
+      if (err.name === "AbortError" || code === "ETIMEDOUT" || code === "ECONNRESET" || code === "ENOTFOUND") {
+        console.log(`请求失败 (${err.name === "AbortError" ? "超时" : code})，重试 ${i + 1}/${retries}...`);
+      } else {
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
 async function fetchSina(codes) {
-  const r = await fetch(`https://hq.sinajs.cn/?list=${codes}`, {
+  const r = await fetchWithRetry(`https://hq.sinajs.cn/?list=${codes}`, {
     headers: { Referer: "https://finance.sina.com.cn", "User-Agent": UA },
   });
   const buf = await r.arrayBuffer();
@@ -90,7 +114,7 @@ async function fetchNews() {
   const url =
     "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=50&page=1";
 
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     headers: { Referer: "https://news.sina.com.cn/roll/", "User-Agent": UA },
   });
   const json = await res.json();
@@ -221,7 +245,7 @@ async function sendNotification(title, content) {
   const url = `https://sctapi.ftqq.com/${SENDKEY}.send`;
   const body = new URLSearchParams({ title, desp: content });
 
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body.toString(),
