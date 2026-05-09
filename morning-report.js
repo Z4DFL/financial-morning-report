@@ -61,7 +61,13 @@ async function fetchSina(codes) {
 // ═══════════════════════════════════════════════════════════════
 
 const EM_UT = "b2884a393a59ad64002292a3e90d46a5";
-const EM_HEADERS = { "User-Agent": UA, Referer: "https://quote.eastmoney.com/" };
+const EM_HEADERS = {
+  "User-Agent": UA,
+  "Referer": "https://quote.eastmoney.com/",
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+  "Cache-Control": "no-cache",
+};
 
 async function fetchEMJSON(url) {
   const r = await fetchWithRetry(url, { headers: EM_HEADERS });
