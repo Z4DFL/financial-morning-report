@@ -1,14 +1,19 @@
-// 金融市场晨报 — 每天早上 9:00 通过 Server酱 推送到微信
-// 数据源: 新浪财经 (A股指数/外汇/大宗商品/新闻)
+// 金融市场晨报 v2 — 多信源聚合 + AI 总结
+// 每天早上 8:30 通过 cron-job.org 触发 → GitHub Action → Server酱 → 微信
+// 数据源: 新浪财经 + 东方财富 + DeepSeek AI
+
 import { writeFileSync } from "node:fs";
 
 const SENDKEY = process.env.SENDKEY || "SCT346359T1ErBbbcPAUM5AZo4fy2pXSpa";
+const AI_API_KEY = process.env.AI_API_KEY || "";      // DeepSeek / OpenAI 兼容 key
+const AI_BASE_URL = process.env.AI_BASE_URL || "https://api.deepseek.com/v1";
+const AI_MODEL = process.env.AI_MODEL || "deepseek-chat";
 
-// ---- HTTP helpers ----
+// ═══════════════════════════════════════════════════════════════
+// HTTP 工具
+// ═══════════════════════════════════════════════════════════════
 
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const FETCH_TIMEOUT_MS = 15000;
 const MAX_RETRIES = 3;
 
@@ -33,6 +38,10 @@ async function fetchWithRetry(url, options = {}, retries = MAX_RETRIES) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// 新浪财经 API (GBK 编码)
+// ═══════════════════════════════════════════════════════════════
+
 async function fetchSina(codes) {
   const r = await fetchWithRetry(`https://hq.sinajs.cn/?list=${codes}`, {
     headers: { Referer: "https://finance.sina.com.cn", "User-Agent": UA },
@@ -47,11 +56,38 @@ async function fetchSina(codes) {
   return result;
 }
 
-// ---- 品种配置 ----
+// ═══════════════════════════════════════════════════════════════
+// 东方财富 API (JSON)
+// ═══════════════════════════════════════════════════════════════
 
-const INDEX_CODES = [
-  "s_sh000001,s_sh000300,s_sh000016,s_sz399001,s_sz399006,s_sh000905,s_sh000688",
-];
+const EM_UT = "b2884a393a59ad64002292a3e90d46a5";
+const EM_HEADERS = { "User-Agent": UA, Referer: "https://quote.eastmoney.com/" };
+
+async function fetchEMJSON(url) {
+  const r = await fetchWithRetry(url, { headers: EM_HEADERS });
+  return r.json();
+}
+
+async function fetchEMClist(fs, fields, { pz = 200, fid = "f3", po = 1 } = {}) {
+  const params = new URLSearchParams({ pn: "1", pz: String(pz), po: String(po), np: "1", fid, fs, fields, ut: EM_UT });
+  const url = `https://push2.eastmoney.com/api/qt/clist/get?${params}`;
+  const data = await fetchEMJSON(url);
+  return data?.data?.diff ?? [];
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 品种配置
+// ═══════════════════════════════════════════════════════════════
+
+const INDEX_CODES = "s_sh000001,s_sh000300,s_sh000016,s_sz399001,s_sz399006,s_sh000905,s_sh000688";
+
+const OVERSEAS_SINA = {
+  int_dji:       { name: "道琼斯", ticker: "DJI" },
+  int_nasdaq:    { name: "纳斯达克", ticker: "IXIC" },
+  int_snp500:    { name: "标普500", ticker: "SPX" },
+  int_hangseng:  { name: "恒生指数", ticker: "HSI" },
+  int_hscei:     { name: "国企指数", ticker: "HSCEI" },
+};
 
 const FOREX_PAIRS = {
   fx_susdcny: { name: "美元/人民币", ticker: "USDCNY", decimals: 4 },
@@ -62,26 +98,49 @@ const FOREX_PAIRS = {
   fx_susdhkd: { name: "美元/港元", ticker: "USDHKD", decimals: 4 },
 };
 
+// 国内期货
+const DOMESTIC_FUTURES = ["nf_AU0", "nf_RB0", "nf_I0", "nf_J0", "nf_M0", "nf_LH0"];
+
+const DOMESTIC_FUTURE_META = {
+  nf_AU0: { name: "沪金", unit: "元/克" },
+  nf_RB0: { name: "螺纹钢", unit: "元/吨" },
+  nf_I0:  { name: "铁矿石", unit: "元/吨" },
+  nf_J0:  { name: "焦煤", unit: "元/吨" },
+  nf_M0:  { name: "豆粕", unit: "元/吨" },
+  nf_LH0: { name: "生猪", unit: "元/吨" },
+};
+
+// 海外期货
 const INTL_COMMODITIES = [
   { code: "hf_XAG", key: "hf_XAG", name: "伦敦银", unit: "美元" },
-  { code: "hf_HG", key: "hf_HG", name: "COMEX铜", unit: "美元" },
-  { code: "hf_CL", key: "hf_CL", name: "WTI 原油", unit: "美元" },
+  { code: "hf_HG",  key: "hf_HG",  name: "COMEX铜", unit: "美元" },
+  { code: "hf_CL",  key: "hf_CL",  name: "WTI 原油", unit: "美元" },
   { code: "hf_OIL", key: "hf_OIL", name: "布伦特原油", unit: "美元" },
+  { code: "hf_NG",  key: "hf_NG",  name: "天然气", unit: "美元" },
 ];
 
-// ---- 新闻质量配置 ----
+// ═══════════════════════════════════════════════════════════════
+// 新闻过滤配置
+// ═══════════════════════════════════════════════════════════════
 
 const CLICKBAIT_PATTERNS = [
-  /震惊/, /刚刚/, /突发/, /紧急/, /重磅/, /速看/, /不看后悔/,
+  /震惊/, /刚刚/, /突发/, /重磅/, /速看/, /不看后悔/,
   /惊呆了/, /出大事/, /炸裂/, /疯传/, /一夜暴/,
   /史诗级/, /恐怖/, /骇人/, /必读/, /赶紧/, /马上/,
   /揭秘/, /内幕/, /真相/, /竟然/, /想不到/,
   /注意了/, /定了/, /官宣了/, /终于/, /别错过/, /不要再/,
   /超级/, /极致/, /逆天/, /看呆了/, /说中了/,
+  /直线涨停/, /忙得冒烟/, /板了/, /起飞了/, /太突然/,
+];
+
+const HK_RESEARCH_PATTERNS = [
+  /目标价.*港元/, /目标价.*美元/, /维持.*评级/, /给予.*评级/, /首次覆盖/,
+  /上调.*目标价/, /下调.*目标价/, /重申.*评级/, /升至.*港元/, /降至.*港元/,
 ];
 
 const MEDIA_AUTHORITY = {
   "新华社": 5, "央视新闻": 5, "人民日报": 5, "央视网": 5, "新华网": 5,
+  "央行": 5, "证监会": 5, "银保监会": 5, "国务院": 5,
   "证券时报": 4, "上海证券报": 4, "中国证券报": 4, "证券日报": 4,
   "经济参考报": 4, "中证网": 4, "中新社": 4, "中新网": 4,
   "第一财经": 3, "21世纪经济报道": 3, "经济观察报": 3, "经济日报": 3,
@@ -90,9 +149,9 @@ const MEDIA_AUTHORITY = {
   "券商中国": 3, "中国经营报": 3, "金融界": 3,
   "新浪财经": 2, "东方财富": 2, "和讯网": 2, "36氪": 2,
   "腾讯财经": 2, "网易财经": 2, "凤凰财经": 2, "腾讯新闻": 2,
+  "环球市场播报": 2,
 };
 
-// 金融相关关键词，用于筛选财经新闻
 const FINANCE_KEYWORDS = [
   "股", "市", "基金", "债", "汇", "央行", "美联储", "IPO",
   "A股", "港股", "美股", "指数", "板块", "涨停", "跌停",
@@ -105,13 +164,20 @@ const FINANCE_KEYWORDS = [
 ];
 
 const NEWS_FETCH_COUNT = 80;
-const NEWS_OUTPUT_COUNT = 8;
+const NEWS_OUTPUT_COUNT = 10;
 
-// ---- 新闻过滤函数 ----
+// ═══════════════════════════════════════════════════════════════
+// 新闻过滤函数
+// ═══════════════════════════════════════════════════════════════
 
 function isClickbait(title) {
   if (!title) return true;
   return CLICKBAIT_PATTERNS.some((p) => p.test(title));
+}
+
+function isHKResearch(title) {
+  if (!title) return false;
+  return HK_RESEARCH_PATTERNS.some((p) => p.test(title));
 }
 
 function mediaScore(name) {
@@ -122,30 +188,60 @@ function mediaScore(name) {
   return 0;
 }
 
-// ---- 数据获取 ----
+function cleanTitle(title) {
+  // 去掉开头的媒体标签，如 "焦煤跌超4%"
+  return (title || "").replace(/^(视频|突发|刚刚|快讯|午评|收评|夜读)[：:：]\s*/g, "").trim();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 1. A股指数 (新浪)
+// ═══════════════════════════════════════════════════════════════
 
 async function fetchIndices() {
-  const data = await fetchSina(INDEX_CODES[0]);
-  const order = INDEX_CODES[0].split(",");
-  return order
-    .map((code) => {
-      const f = data[code];
-      if (!f) return null;
-      return {
-        name: f[0],
-        code,
-        price: parseFloat(f[1]) || 0,
-        changePct: parseFloat(f[3]) || 0,
-        changeAmt: parseFloat(f[2]) || 0,
-      };
-    })
-    .filter(Boolean);
+  const data = await fetchSina(INDEX_CODES);
+  const codes = INDEX_CODES.split(",");
+  return codes.map((code) => {
+    const f = data[code];
+    if (!f || !f[1]) return null;
+    // 新浪 A 指数字段: f[0]=名称, f[1]=当前价, f[2]=涨跌额, f[3]=涨跌幅(%),
+    //                   f[4]=成交量(手), f[5]=成交额(万)
+    const price = parseFloat(f[1]) || 0;
+    const changePct = parseFloat(f[3]) || 0;
+    const changeAmt = parseFloat(f[2]) || 0;
+    const volume = parseFloat(f[5]) || 0; // 成交额 万元
+    return { name: f[0], code, price, changePct, changeAmt, volume };
+  }).filter(Boolean);
 }
+
+// ═══════════════════════════════════════════════════════════════
+// 2. 隔夜海外指数 (新浪 — 前一交易日收盘)
+// ═══════════════════════════════════════════════════════════════
+
+async function fetchOverseas() {
+  const codes = Object.keys(OVERSEAS_SINA).join(",");
+  const data = await fetchSina(codes);
+  return Object.entries(data).map(([code, f]) => {
+    const cfg = OVERSEAS_SINA[code] || {};
+    const price = parseFloat(f[1]) || 0;
+    const prevClose = parseFloat(f[2]) || 0;
+    const changePct = parseFloat(f[3]) || (prevClose ? ((price - prevClose) / prevClose * 100) : 0);
+    return {
+      name: cfg.name || f[0] || code,
+      ticker: cfg.ticker || code,
+      price,
+      changePct,
+      changeAmt: parseFloat(f[4]) || (price - prevClose),
+    };
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 3. 外汇 (新浪)
+// ═══════════════════════════════════════════════════════════════
 
 async function fetchForexData() {
   const codes = Object.keys(FOREX_PAIRS).join(",");
   const data = await fetchSina(codes);
-
   return Object.entries(data).map(([key, fields]) => {
     const cfg = FOREX_PAIRS[key] || {};
     return {
@@ -159,60 +255,55 @@ async function fetchForexData() {
   });
 }
 
-async function fetchCommodityData() {
-  // 国内期货和海外期货分开请求
-  const [domesticData, intlData] = await Promise.all([
-    fetchSina("nf_AU0"),
-    fetchSina(INTL_COMMODITIES.map((c) => c.code).join(",")),
+// ═══════════════════════════════════════════════════════════════
+// 4. 大宗商品 (新浪国内+海外期货)
+// ═══════════════════════════════════════════════════════════════
+
+async function fetchCommodities() {
+  const domCodes = DOMESTIC_FUTURES.join(",");
+  const intlCodes = INTL_COMMODITIES.map((c) => c.code).join(",");
+  const [domData, intlData] = await Promise.all([
+    fetchSina(domCodes),
+    fetchSina(intlCodes),
   ]);
 
   const commodities = [];
 
-  // 沪金连续 (nf_AU0) — 国内期货格式
-  const nfFields = domesticData["nf_AU0"];
-  if (nfFields && nfFields.length > 7) {
-    const name = "沪金连续";
-    const rawPrice = parseFloat(nfFields[7]);
-    const price = isNaN(rawPrice) ? 0 : rawPrice;
-    const prevSettle = parseFloat(nfFields[4]) || NaN;
+  // 国内期货
+  for (const code of DOMESTIC_FUTURES) {
+    const f = domData[code];
+    const meta = DOMESTIC_FUTURE_META[code] || {};
+    if (!f || f.length < 8) {
+      commodities.push({ name: meta.name || code, code, price: 0, changePct: NaN, changeAmt: NaN, unit: meta.unit || "" });
+      continue;
+    }
+    // 新浪期货字段: f[0]=名称, f[1]=时间, f[2]=开盘, f[3]=最高, f[4]=最低,
+    //               f[5]=买价, f[6]=卖价, f[7]=最新价, f[8]=昨收, f[9]=买量,
+    //               f[10]=昨结算, f[11]=持仓量, f[12]=成交量
+    const price = parseFloat(f[7]) || parseFloat(f[8]) || parseFloat(f[2]) || 0;
+    const prevSettle = parseFloat(f[10]) || parseFloat(f[8]) || NaN;
     const hasPrev = !isNaN(prevSettle) && prevSettle > 0;
     commodities.push({
-      name,
-      code: "AU0",
-      price,
+      name: meta.name || code, code, price,
       prevClose: hasPrev ? prevSettle : NaN,
-      changePct: hasPrev ? ((price - prevSettle) / prevSettle * 100) : NaN,
-      changeAmt: hasPrev ? price - prevSettle : NaN,
-      unit: "元/克",
-    });
-    console.log(`nf_AU0 字段: name=${name} price=${price} prevSettle=${prevSettle}`);
-  } else {
-    console.log("nf_AU0 数据为空，可能非交易时段");
-    commodities.push({
-      name: "沪金连续",
-      code: "AU0",
-      price: 0,
-      prevClose: NaN,
-      changePct: NaN,
-      changeAmt: NaN,
-      unit: "元/克",
+      changePct: hasPrev ? parseFloat(((price - prevSettle) / prevSettle * 100).toFixed(2)) : NaN,
+      changeAmt: hasPrev ? parseFloat((price - prevSettle).toFixed(2)) : NaN,
+      unit: meta.unit || "",
     });
   }
 
-  // 海外期货 (hf_ 格式)
+  // 海外期货
   for (const cfg of INTL_COMMODITIES) {
     const f = intlData[cfg.key];
     if (!f) continue;
-    const hasPrevClose = f[1] != null && f[1].trim() !== "";
+    const hasPrev = f[1] != null && f[1].trim() !== "";
     const rawPrev = parseFloat(f[1]);
     const price = parseFloat(f[0]) || 0;
     commodities.push({
-      name: cfg.name,
-      code: cfg.code,
-      price,
-      prevClose: hasPrevClose ? rawPrev : NaN,
-      changePct: hasPrevClose && rawPrev !== 0 ? ((price - rawPrev) / rawPrev * 100) : NaN,
-      changeAmt: hasPrevClose ? price - rawPrev : NaN,
+      name: cfg.name, code: cfg.code, price,
+      prevClose: hasPrev ? rawPrev : NaN,
+      changePct: hasPrev && rawPrev !== 0 ? parseFloat(((price - rawPrev) / rawPrev * 100).toFixed(2)) : NaN,
+      changeAmt: hasPrev ? parseFloat((price - rawPrev).toFixed(2)) : NaN,
       unit: cfg.unit,
     });
   }
@@ -220,180 +311,346 @@ async function fetchCommodityData() {
   return commodities;
 }
 
-async function fetchNews() {
-  const url = `https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=${NEWS_FETCH_COUNT}&page=1`;
+// ═══════════════════════════════════════════════════════════════
+// 5. A股市场宽度 (东方财富 — 涨跌家数、成交额统计)
+// ═══════════════════════════════════════════════════════════════
 
-  const res = await fetchWithRetry(url, {
-    headers: { Referer: "https://news.sina.com.cn/roll/", "User-Agent": UA },
-  });
-  const json = await res.json();
-  let articles = json.result?.data ?? [];
+async function fetchMarketBreadth() {
+  try {
+    // 并行抓取 3 页数据采样，覆盖涨跌两端
+    const results = await Promise.all([
+      fetchEMClist("m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", "f3,f12", { pz: 100 }),
+      fetchEMClist("m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", "f3,f12", { pz: 100, po: 0 }),
+      fetchEMClist("m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23", "f3,f12", { pz: 100, fid: "f12" }),
+    ]);
+    const allStocks = new Map();
+    for (const batch of results) {
+      for (const s of (Array.isArray(batch) ? batch : Object.values(batch || {}))) {
+        allStocks.set(s.f12, parseFloat(s.f3) || 0);
+      }
+    }
+    let up = 0, down = 0, flat = 0;
+    for (const pct of allStocks.values()) {
+      if (pct > 0) up++;
+      else if (pct < 0) down++;
+      else flat++;
+    }
+    return { up, down, flat, total: up + down + flat };
+  } catch (e) {
+    console.log("市场宽度获取失败:", e.message);
+    return { up: 0, down: 0, flat: 0, total: 0 };
+  }
+}
 
-  const todayStart =
-    new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime() / 1000;
+// ═══════════════════════════════════════════════════════════════
+// 6. 行业板块热度 (东方财富 — 涨跌前3)
+// ═══════════════════════════════════════════════════════════════
 
-  // 第一层: 今日文章
-  articles = articles.filter((a) => parseInt(a.ctime) >= todayStart);
+async function fetchSectors() {
+  try {
+    const raw = await fetchEMClist("m:90+t:2", "f3,f4,f12,f14,f104,f105", { pz: 100, fid: "f3", po: 1 });
+    const list = Array.isArray(raw) ? raw : Object.values(raw);
+    // East Money f3 是百分比*100，如 823 = 8.23%
+    const sorted = list
+      .filter((s) => s.f14 && !s.f14.includes("Ⅱ") && !s.f14.includes("Ⅲ")) // 去重：只要一级分类
+      .map((s) => ({
+        name: s.f14,
+        changePct: parseFloat((parseFloat(s.f3) / 100).toFixed(2)),
+        up: parseInt(s.f104) || 0,
+        down: parseInt(s.f105) || 0,
+      }))
+      .sort((a, b) => b.changePct - a.changePct);
+    return {
+      top3: sorted.slice(0, 3),
+      bottom3: sorted.slice(-3).reverse(),
+    };
+  } catch (e) {
+    console.log("板块数据获取失败:", e.message);
+    return { top3: [], bottom3: [] };
+  }
+}
 
-  // 第二层: 金融相关性过滤
-  articles = articles.filter((a) => {
-    const text = (a.title || "") + (a.keywords || "");
-    return FINANCE_KEYWORDS.some((kw) => text.includes(kw));
-  });
+// ═══════════════════════════════════════════════════════════════
+// 7. 新闻聚合 (新浪 + 东方财富)
+// ═══════════════════════════════════════════════════════════════
 
-  // 第三层: 标题党过滤
-  articles = articles.filter((a) => !isClickbait(a.title));
+async function fetchSinaNews() {
+  try {
+    const url = `https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=${NEWS_FETCH_COUNT}&page=1`;
+    const res = await fetchWithRetry(url, {
+      headers: { Referer: "https://news.sina.com.cn/roll/", "User-Agent": UA },
+    });
+    const json = await res.json();
+    return (json.result?.data ?? []).map((a) => ({
+      title: cleanTitle(a.title || ""),
+      url: a.url || "",
+      time: new Date(parseInt(a.ctime) * 1000),
+      intro: (a.intro || "").trim(),
+      media: (a.media_name || "").trim(),
+      source: "新浪",
+      authority: mediaScore(a.media_name),
+    }));
+  } catch (e) {
+    console.log("新浪新闻获取失败:", e.message);
+    return [];
+  }
+}
 
-  // docid 去重
+function deduplicateNews(articles) {
   const seen = new Set();
-  articles = articles.filter((a) => {
-    const id = a.docid || a.title;
-    if (seen.has(id)) return false;
-    seen.add(id);
+  return articles.filter((a) => {
+    // 取标题前 8 个字做去重 key
+    const key = (a.title || "").slice(0, 8);
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
+}
 
-  // 按媒体权威性降序，同分按时间倒序
-  articles.sort((a, b) => {
-    const sa = mediaScore(a.media_name);
-    const sb = mediaScore(b.media_name);
+function classifyNews(article) {
+  const t = article.title || "";
+  if (/央行|降息|加息|LPR|逆回购|MLF|存款准备金|货币政策|财政|国务院|政治局|GDP|CPI|PMI|通胀|经济数据/.test(t))
+    return "宏观";
+  if (/美股|港股|欧股|日股|美联储|非农|道指|纳指|标普|恒生/.test(t))
+    return "海外";
+  if (/板块|涨停|跌停|概念|行情|指数|A股|上证|深证|创业板|科创板/.test(t))
+    return "市场";
+  if (/公司|业绩|IPO|上市|财报|营收|利润|收购|回购/.test(t))
+    return "公司";
+  return "其他";
+}
+
+async function fetchAllNews() {
+  // 新浪新闻（暂不接入东财新闻，反爬保护）
+  const sinaNews = await fetchSinaNews();
+
+  const todayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime() / 1000;
+  const recent = sinaNews.filter((a) => a.time.getTime() / 1000 >= todayStart - 86400);
+
+  let filtered = recent
+    .filter((a) => !isClickbait(a.title))
+    .filter((a) => {
+      const text = (a.title || "") + (a.intro || "");
+      return FINANCE_KEYWORDS.some((kw) => text.includes(kw));
+    });
+
+  filtered = deduplicateNews(filtered);
+
+  // 港股研报降权
+  filtered.sort((a, b) => {
+    const sa = isHKResearch(a.title) ? 0 : a.authority;
+    const sb = isHKResearch(b.title) ? 0 : b.authority;
     if (sa !== sb) return sb - sa;
-    return parseInt(b.ctime) - parseInt(a.ctime);
+    return b.time - a.time;
   });
 
-  articles = articles.slice(0, NEWS_OUTPUT_COUNT);
+  // 按类别各取，宏观优先
+  const categories = { "宏观": [], "市场": [], "海外": [], "公司": [], "其他": [] };
+  for (const a of filtered) {
+    const cat = classifyNews(a);
+    if (categories[cat] && categories[cat].length < 4) categories[cat].push(a);
+  }
 
-  // 最终按时间正序展示
-  articles.sort((a, b) => parseInt(a.ctime) - parseInt(b.ctime));
+  let result = [...categories["宏观"], ...categories["市场"], ...categories["海外"]];
+  if (result.length < NEWS_OUTPUT_COUNT) {
+    result = result.concat(categories["公司"], categories["其他"]);
+  }
+  result = result.slice(0, NEWS_OUTPUT_COUNT);
+  result.sort((a, b) => b.authority - a.authority);
 
-  return articles.map((a) => ({
-    title: a.title || "",
-    url: a.url || "",
-    time: new Date(parseInt(a.ctime) * 1000).toLocaleTimeString("zh-CN", { hour12: false }),
-    intro: (a.intro || "").trim(),
-    media: (a.media_name || "").trim(),
+  return result.map((a) => ({
+    title: a.title,
+    url: a.url,
+    time: a.time.toLocaleTimeString("zh-CN", { hour12: false }),
+    intro: a.intro,
+    media: a.media,
+    category: classifyNews(a),
   }));
 }
 
-// ---- 市场概览生成 ----
+// ═══════════════════════════════════════════════════════════════
+// 8. AI 市场总结 (DeepSeek / OpenAI 兼容 API)
+// ═══════════════════════════════════════════════════════════════
 
-function generateOverview(indices, commodities) {
-  const up = indices.filter((i) => i.changePct > 0);
-  const down = indices.filter((i) => i.changePct < 0);
-  const best = indices.reduce((a, b) => (a.changePct > b.changePct ? a : b));
-  const gold = commodities.find((c) => c.code === "AU0");
-  const oil = commodities.find((c) => c.code === "CL");
-
-  let overview = "";
-
-  if (up.length === indices.length) {
-    overview += `今日 A 股全面走强，`;
-  } else if (down.length === indices.length) {
-    overview += `今日 A 股全线收跌，`;
-  } else {
-    overview += `今日 A 股走势分化，`;
+async function generateAISummary(marketData) {
+  if (!AI_API_KEY) {
+    console.log("未配置 AI_API_KEY，跳过 AI 总结");
+    return "";
   }
 
-  overview += `${indices.length}大指数中 ${up.length} 涨 ${down.length} 跌，`;
-  const dir = best.changePct > 0 ? "上涨" : "下跌";
-  overview += `${best.name}表现最佳，${dir} ${Math.abs(best.changePct).toFixed(2)}%。`;
+  const prompt = `你是一位资深证券分析师。请根据以下金融市场数据，写一段150-200字的市场综述。
 
-  const lines = [];
-  if (gold && !isNaN(gold.changePct)) {
-    const gdir = gold.changePct > 0 ? "上涨" : "下跌";
-    lines.push(`沪金${gdir} ${Math.abs(gold.changePct).toFixed(2)}% 至 ${gold.price.toFixed(2)} 元/克`);
-  } else if (gold && gold.price > 0) {
-    lines.push(`沪金报 ${gold.price.toFixed(2)} 元/克`);
-  }
-  if (oil && !isNaN(oil.changePct) && Math.abs(oil.changePct) > 0.01) {
-    const odir = oil.changePct > 0 ? "上涨" : "下跌";
-    lines.push(`WTI 原油${odir} ${Math.abs(oil.changePct).toFixed(2)}% 至 ${oil.price.toFixed(2)} 美元`);
-  } else if (oil && oil.price > 0) {
-    lines.push(`WTI 原油报 ${oil.price.toFixed(2)} 美元`);
-  }
-  if (lines.length > 0) {
-    overview += `\n\n${lines.join("，")}。`;
-  }
+要求：
+1. 一句话概括今日市场核心矛盾
+2. 点出2-3个主要驱动因素
+3. 提示今日需关注的风险点
+4. 语言精炼，避免套话
 
-  return overview;
+数据如下：
+${marketData}
+
+市场综述：`;
+
+  try {
+    const res = await fetchWithRetry(`${AI_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${AI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: AI_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 400,
+        temperature: 0.3,
+      }),
+    });
+    const json = await res.json();
+    return json?.choices?.[0]?.message?.content?.trim() || "";
+  } catch (e) {
+    console.log("AI 总结生成失败:", e.message);
+    return "";
+  }
 }
 
-// ---- 报告格式化 ----
+// ═══════════════════════════════════════════════════════════════
+// 帮助函数
+// ═══════════════════════════════════════════════════════════════
 
 function arrow(pct) {
+  if (isNaN(pct)) return "";
   return pct > 0 ? "↑" : pct < 0 ? "↓" : "→";
 }
 
-function formatReport(indices, forexList, commodities, articles) {
+function fmtPct(pct) {
+  if (isNaN(pct)) return "—";
+  return `${arrow(pct)}${Math.abs(pct).toFixed(2)}%`;
+}
+
+function fmtNum(n, unit) {
+  if (!n || isNaN(n)) return "—";
+  if (n >= 100000000) return `${(n / 100000000).toFixed(0)}亿`;
+  if (n >= 10000) return `${(n / 10000).toFixed(0)}万`;
+  return `${n.toFixed(0)}${unit || ""}`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 报告格式化
+// ═══════════════════════════════════════════════════════════════
+
+function formatReport({
+  aiSummary, indices, overseas, sectors, breadth,
+  forexList, commodities, articles,
+}) {
   const now = new Date();
   const today = now.toLocaleDateString("zh-CN", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    weekday: "long",
+    year: "numeric", month: "long", day: "numeric", weekday: "long",
   });
 
   let md = `# 金融市场晨报\n\n**${today}**\n\n`;
 
-  md += `## 市场概览\n\n${generateOverview(indices, commodities)}\n\n`;
-
-  md += `## A股指数\n\n`;
-  md += `| 指数 | 最新价 | 涨跌幅 | 涨跌额 |\n`;
-  md += `|------|--------|--------|--------|\n`;
-  for (const item of indices) {
-    const a = arrow(item.changePct);
-    md += `| ${item.name} | ${item.price.toFixed(2)} | ${a}${item.changePct.toFixed(2)}% | ${item.changeAmt >= 0 ? "+" : ""}${item.changeAmt.toFixed(2)} |\n`;
+  // —— AI 总结 ——
+  if (aiSummary) {
+    md += `> ${aiSummary}\n\n`;
   }
 
-  md += `\n## 外汇\n\n`;
-  md += `| 货币对 | 最新价 | 涨跌幅 |\n`;
-  md += `|--------|--------|--------|\n`;
-  for (const item of forexList) {
-    const a = arrow(item.changePct);
-    md += `| ${item.name} | ${item.price.toFixed(item.decimals)} | ${a}${item.changePct.toFixed(4)}% |\n`;
-  }
-
-  md += `\n## 大宗商品\n\n`;
-  md += `| 商品 | 最新价 | 涨跌幅 |\n`;
-  md += `|------|--------|--------|\n`;
-  for (const item of commodities) {
-    let pctStr = "—";
-    if (!isNaN(item.changePct)) {
-      const a = arrow(item.changePct);
-      pctStr = `${a}${item.changePct.toFixed(2)}%`;
+  // —— 隔夜海外 ——
+  const validOverseas = overseas.filter((o) => o.price > 0);
+  if (validOverseas.length > 0) {
+    md += `## 隔夜海外\n\n`;
+    md += `| 指数 | 收盘价 | 涨跌幅 |\n|------|--------|--------|\n`;
+    for (const o of validOverseas) {
+      md += `| ${o.name} | ${o.price.toFixed(2)} | ${fmtPct(o.changePct)} |\n`;
     }
-    md += `| ${item.name} | ${item.price.toFixed(2)} ${item.unit} | ${pctStr} |\n`;
+    md += `\n`;
   }
 
+  // —— A股昨日复盘 ——
+  md += `## A股昨日复盘\n\n`;
+
+  // 市场概览
+  if (breadth.total > 0) {
+    const upPct = (breadth.up / breadth.total * 100).toFixed(0);
+    const downPct = (breadth.down / breadth.total * 100).toFixed(0);
+    const up = indices.filter((i) => i.changePct > 0);
+    const down = indices.filter((i) => i.changePct < 0);
+    const best = indices.reduce((a, b) => (a.changePct > b.changePct ? a : b), indices[0]);
+    const totalVol = indices.reduce((s, i) => s + (i.volume || 0), 0);
+
+    let overview = "";
+    if (up.length === indices.length) overview += "全线走强，";
+    else if (down.length === indices.length) overview += "全线收跌，";
+    else overview += "走势分化，";
+
+    overview += `${indices.length}大指数 ${up.length}涨${down.length}跌，`;
+    const dir = best.changePct > 0 ? "上涨" : "下跌";
+    overview += `${best.name}表现最佳${dir}${Math.abs(best.changePct).toFixed(2)}%。`;
+    if (breadth.total > 0) {
+      overview += ` 全市场${breadth.up}家上涨/${breadth.down}家下跌。`;
+    }
+
+    md += `${overview}\n\n`;
+  }
+
+  // 指数表
+  md += `| 指数 | 收盘 | 涨跌幅 | 涨跌额 | 成交额(亿) |\n|------|------|--------|--------|------------|\n`;
+  for (const item of indices) {
+    const vol = item.volume ? (item.volume / 10000).toFixed(0) : "—";
+    md += `| ${item.name} | ${item.price.toFixed(2)} | ${fmtPct(item.changePct)} | ${item.changeAmt >= 0 ? "+" : ""}${item.changeAmt.toFixed(2)} | ${vol} |\n`;
+  }
+
+  // —— 行业板块 ——
+  if (sectors.top3.length > 0) {
+    md += `\n## 行业板块\n\n`;
+    md += `**领涨：** `;
+    md += sectors.top3.map((s) => `${s.name} ${fmtPct(s.changePct)}`).join(" | ");
+    md += `\n\n**领跌：** `;
+    md += sectors.bottom3.map((s) => `${s.name} ${fmtPct(s.changePct)}`).join(" | ");
+    md += `\n`;
+  }
+
+  // —— 外汇 ——
+  md += `\n## 外汇\n\n`;
+  md += `| 货币对 | 最新价 | 涨跌幅 |\n|--------|--------|--------|\n`;
+  for (const item of forexList) {
+    md += `| ${item.name} | ${item.price.toFixed(item.decimals)} | ${fmtPct(item.changePct)} |\n`;
+  }
+
+  // —— 大宗商品 ——
+  md += `\n## 大宗商品\n\n`;
+  md += `| 商品 | 最新价 | 涨跌幅 |\n|------|--------|--------|\n`;
+  for (const item of commodities) {
+    md += `| ${item.name} | ${item.price.toFixed(2)} ${item.unit} | ${fmtPct(item.changePct)} |\n`;
+  }
+
+  // —— 要闻 ——
   if (articles.length > 0) {
     md += `\n## 今日要闻\n\n`;
     for (let i = 0; i < articles.length; i++) {
       const a = articles[i];
-      md += `${i + 1}. **${a.title}**`;
-      if (a.media) md += ` — ${a.media}`;
-      md += `\n`;
+      md += `${i + 1}. **${a.title}** — ${a.media}\n`;
       if (a.intro) md += `   > ${a.intro}\n`;
       md += `   [阅读全文](${a.url})\n\n`;
     }
   }
 
-  md += `\n---\n*数据来源: 新浪财经  |  更新时间: ${now.toLocaleTimeString("zh-CN", { hour12: false })}*`;
+  md += `\n---\n*数据: 新浪财经 + 东方财富 | 更新: ${now.toLocaleTimeString("zh-CN", { hour12: false })}*`;
 
   return md;
 }
 
-// ---- 发送通知 ----
+// ═══════════════════════════════════════════════════════════════
+// 推送
+// ═══════════════════════════════════════════════════════════════
 
 async function sendNotification(title, content) {
   const url = `https://sctapi.ftqq.com/${SENDKEY}.send`;
   const body = new URLSearchParams({ title, desp: content });
-
   const res = await fetchWithRetry(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: body.toString(),
   });
-
   const result = await res.json();
   if (result.code === 0) {
     console.log("晨报已发送到微信");
@@ -403,28 +660,75 @@ async function sendNotification(title, content) {
   }
 }
 
-// ---- 主流程 ----
+// ═══════════════════════════════════════════════════════════════
+// 主流程
+// ═══════════════════════════════════════════════════════════════
 
 async function main() {
-  console.log("正在获取市场数据...");
+  console.log("=== 金融市场晨报 v2 ===\n");
 
-  const [indices, forexList, commodities, articles] = await Promise.all([
+  // Step 1: 并行获取所有行情数据
+  console.log("[1/4] 获取行情数据...");
+  const [indices, overseas, forexList, commodities, breadth, sectors] = await Promise.all([
     fetchIndices(),
+    fetchOverseas(),
     fetchForexData(),
-    fetchCommodityData(),
-    fetchNews(),
+    fetchCommodities(),
+    fetchMarketBreadth(),
+    fetchSectors(),
   ]);
+  console.log(`  指数:${indices.length} | 海外:${overseas.filter(o=>o.price>0).length} | 外汇:${forexList.length} | 商品:${commodities.length}`);
+  console.log(`  市场宽度: ${breadth.up}涨 ${breadth.down}跌 ${breadth.flat}平`);
 
-  console.log(`指数: ${indices.length} | 外汇: ${forexList.length} | 商品: ${commodities.length} | 新闻: ${articles.length}`);
+  // Step 2: 获取新闻
+  console.log("[2/4] 聚合新闻...");
+  const articles = await fetchAllNews();
+  console.log(`  新闻: ${articles.length}条`);
 
-  const report = formatReport(indices, forexList, commodities, articles);
+  // Step 3: AI 总结
+  console.log("[3/4] 生成 AI 总结...");
+  const dataSummary = buildDataSummary({ indices, overseas, sectors, breadth, forexList, commodities, articles });
+  const aiSummary = await generateAISummary(dataSummary);
+  if (aiSummary) console.log(`  AI 总结: ${aiSummary.length}字`);
+  else console.log("  跳过 AI 总结");
 
-  const dateStr = new Date().toISOString().slice(0, 10);
+  // Step 4: 格式化 & 推送
+  console.log("[4/4] 生成报告并推送...");
+  const report = formatReport({ aiSummary, indices, overseas, sectors, breadth, forexList, commodities, articles });
+
+  const dateStr = now().slice(0, 10);
   writeFileSync(`morning-report-${dateStr}.md`, report, "utf-8");
-  console.log(`已保存到 morning-report-${dateStr}.md`);
+  console.log(`  已保存到 morning-report-${dateStr}.md`);
 
   const title = `金融市场晨报 - ${new Date().toLocaleDateString("zh-CN")}`;
   await sendNotification(title, report);
+}
+
+function now() {
+  return new Date().toISOString();
+}
+
+function buildDataSummary({ indices, overseas, sectors, breadth, forexList, commodities, articles }) {
+  const lines = [];
+  lines.push("## A股指数");
+  for (const i of indices) lines.push(`${i.name}: ${i.price.toFixed(2)} ${fmtPct(i.changePct)}`);
+  lines.push(`涨跌比: ${breadth.up}/${breadth.down}/${breadth.flat}`);
+  lines.push("\n## 隔夜海外");
+  for (const o of overseas.filter(o => o.price > 0)) lines.push(`${o.name}: ${o.price.toFixed(2)} ${fmtPct(o.changePct)}`);
+  if (sectors.top3.length > 0) {
+    lines.push("\n## 板块");
+    lines.push("领涨: " + sectors.top3.map(s => `${s.name} ${fmtPct(s.changePct)}`).join(", "));
+    lines.push("领跌: " + sectors.bottom3.map(s => `${s.name} ${fmtPct(s.changePct)}`).join(", "));
+  }
+  lines.push("\n## 外汇");
+  for (const f of forexList) lines.push(`${f.name}: ${f.price.toFixed(f.decimals)}`);
+  lines.push("\n## 商品");
+  for (const c of commodities.filter(c => c.price > 0)) lines.push(`${c.name}: ${c.price.toFixed(2)}`);
+  if (articles.length > 0) {
+    lines.push("\n## 今日要闻标题");
+    for (const a of articles.slice(0, 5)) lines.push(`- ${a.title}`);
+  }
+  return lines.join("\n");
 }
 
 main().catch((err) => {
