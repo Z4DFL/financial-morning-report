@@ -69,8 +69,30 @@ const EM_HEADERS = {
   "Cache-Control": "no-cache",
 };
 
+let _emCookie = null;
+
+async function getEMCookie() {
+  if (_emCookie) return _emCookie;
+  try {
+    const r = await fetchWithRetry("https://quote.eastmoney.com/", {
+      headers: { "User-Agent": UA, "Accept": "text/html,application/xhtml+xml,*/*" },
+    });
+    const raw = r.headers.get("set-cookie") || "";
+    const cookies = raw.split(",").map((s) => s.split(";")[0].trim()).filter(Boolean);
+    _emCookie = cookies.join("; ");
+    if (_emCookie) console.log(`  东方财富 cookie 已获取`);
+  } catch (e) {
+    console.log("  东方财富 cookie 获取失败:", e.message);
+    _emCookie = "";
+  }
+  return _emCookie;
+}
+
 async function fetchEMJSON(url) {
-  const r = await fetchWithRetry(url, { headers: EM_HEADERS });
+  const cookie = await getEMCookie();
+  const headers = { ...EM_HEADERS };
+  if (cookie) headers.Cookie = cookie;
+  const r = await fetchWithRetry(url, { headers });
   return r.json();
 }
 
