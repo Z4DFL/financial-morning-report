@@ -5,6 +5,8 @@ on:
     # UTC 01:00 = 北京时间 09:00
     - cron: "0 1 * * *"
   workflow_dispatch:
+  repository_dispatch:
+    types: [morning-report]
 
 jobs:
   report:
