@@ -571,7 +571,7 @@ function fmtNum(n, unit) {
 
 function formatReport({
   aiSummary, indices, overseas, sectors, breadth,
-  forexList, commodities, articles,
+  forexList, commodities, articles, fundamentals,
 }) {
   const now = new Date();
   const today = now.toLocaleDateString("zh-CN", {
