@@ -39,17 +39,24 @@ jobs:
       - name: Generate charts
         run: python charts/generate_charts.py
 
-      - name: Generate report and push
+      - name: Commit charts (先提交图表，确保 URL 可用)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add charts/*.png
+          git diff --staged --quiet || git commit -m "晨报: 更新图表 $(date +%Y-%m-%d)"
+          git push
+
+      - name: Generate report and send to WeChat
         run: node morning-report.js --report
         env:
           SENDKEY: ${{ secrets.SENDKEY }}
           CHART_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/charts
 
-      - name: Commit charts and report
+      - name: Commit report
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add charts/*.png
           git add -f morning-report-*.md
-          git diff --staged --quiet || git commit -m "晨报: 更新图表和报告 $(date +%Y-%m-%d)"
+          git diff --staged --quiet || git commit -m "晨报: 更新报告 $(date +%Y-%m-%d)"
           git push
