@@ -1,8 +1,11 @@
-// 金融市场晨报 v2 — 多信源聚合 + AI 总结
+// 金融市场晨报 v3 — 多信源聚合 + AI 总结 + 图表可视化
 // 每天早上 8:30 通过 cron-job.org 触发 → GitHub Action → Server酱 → 微信
 // 数据源: 新浪财经 + 东方财富 + DeepSeek AI
+// 用法: node morning-report.js           → 完整流程（获取数据 + 生成报告 + 推送）
+//       node morning-report.js --fetch   → 仅获取数据，保存到 market-data.json
+//       node morning-report.js --report  → 从 market-data.json 读取，生成报告并推送
 
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 
 const SENDKEY = process.env.SENDKEY || "SCT346359T1ErBbbcPAUM5AZo4fy2pXSpa";
 const AI_API_KEY = process.env.AI_API_KEY || "";      // DeepSeek / OpenAI 兼容 key
@@ -593,6 +596,31 @@ function formatReport({
     md += `\n`;
   }
 
+  // —— 全球市场估值（来自 Yahoo Finance）——
+  if (fundamentals) {
+    const fundList = fundamentals.fundamentals || [];
+    const cryptoList = fundamentals.crypto || [];
+    if (fundList.length > 0) {
+      md += `## 全球市场\n\n`;
+      md += `| 标的 | 价格 | PE | 52周均线 |\n|------|------|----|----------|\n`;
+      for (const f of fundList) {
+        const price = typeof f.price === "number" ? f.price.toFixed(2) : f.price;
+        const pe = typeof f.pe === "number" ? f.pe.toFixed(1) : f.pe;
+        const f50 = typeof f.fiftyDayAvg === "number" ? f.fiftyDayAvg.toFixed(2) : "—";
+        md += `| ${f.name} | ${price} | ${pe} | ${f50} |\n`;
+      }
+      md += `\n`;
+    }
+    if (cryptoList.length > 0) {
+      md += `**加密货币：** `;
+      md += cryptoList.map((c) => {
+        const pct = typeof c.changePct === "number" ? `${c.changePct.toFixed(2)}%` : "—";
+        return `${c.name} $${typeof c.price === "number" ? c.price.toFixed(0) : c.price} (${pct})`;
+      }).join(" | ");
+      md += `\n\n`;
+    }
+  }
+
   // —— A股昨日复盘 ——
   md += `## A股昨日复盘\n\n`;
 
@@ -662,6 +690,21 @@ function formatReport({
     }
   }
 
+  // —— 图表（若已生成）——
+  const chartBase = process.env.CHART_BASE_URL || "charts";
+  const availableCharts = [
+    { file: "index_performance.png", label: "A股指数表现" },
+    { file: "market_breadth.png", label: "市场涨跌分布" },
+    { file: "sector_heatmap.png", label: "板块热力图" },
+  ].filter((c) => { try { return existsSync(`charts/${c.file}`); } catch { return false; } });
+
+  if (availableCharts.length > 0) {
+    md += `\n## 图表\n\n`;
+    for (const c of availableCharts) {
+      md += `![${c.label}](${chartBase}/${c.file})\n\n`;
+    }
+  }
+
   md += `\n---\n*数据: 新浪财经 + 东方财富 | 更新: ${now.toLocaleTimeString("zh-CN", { hour12: false })}*`;
 
   return md;
@@ -692,11 +735,8 @@ async function sendNotification(title, content) {
 // 主流程
 // ═══════════════════════════════════════════════════════════════
 
-async function main() {
-  console.log("=== 金融市场晨报 v2 ===\n");
-
-  // Step 1: 并行获取所有行情数据
-  console.log("[1/4] 获取行情数据...");
+async function fetchAllMarketData() {
+  console.log("[1/3] 获取行情数据...");
   const [indices, overseas, forexList, commodities, breadth, sectors] = await Promise.all([
     fetchIndices(),
     fetchOverseas(),
@@ -708,25 +748,72 @@ async function main() {
   console.log(`  指数:${indices.length} | 海外:${overseas.filter(o=>o.price>0).length} | 外汇:${forexList.length} | 商品:${commodities.length}`);
   console.log(`  市场宽度: ${breadth.up}涨 ${breadth.down}跌 ${breadth.flat}平`);
 
-  // Step 2: 获取新闻
-  console.log("[2/4] 聚合新闻...");
+  console.log("[2/3] 聚合新闻...");
   const articles = await fetchAllNews();
   console.log(`  新闻: ${articles.length}条`);
 
-  // Step 3: AI 总结
-  console.log("[3/4] 生成 AI 总结...");
+  console.log("[3/3] 生成 AI 总结...");
   const dataSummary = buildDataSummary({ indices, overseas, sectors, breadth, forexList, commodities, articles });
   const aiSummary = await generateAISummary(dataSummary);
   if (aiSummary) console.log(`  AI 总结: ${aiSummary.length}字`);
   else console.log("  跳过 AI 总结");
 
-  // Step 4: 格式化 & 推送
-  console.log("[4/4] 生成报告并推送...");
-  const report = formatReport({ aiSummary, indices, overseas, sectors, breadth, forexList, commodities, articles });
+  return { indices, overseas, forexList, commodities, breadth, sectors, articles, aiSummary };
+}
+
+async function main() {
+  const mode = process.argv[2] || "";
+
+  if (mode === "--fetch") {
+    // 仅获取数据，保存 JSON 供图表脚本使用
+    console.log("=== 金融市场晨报 v3 [数据获取模式] ===\n");
+    const data = await fetchAllMarketData();
+    const dateStr = now().slice(0, 10);
+    writeFileSync("market-data.json", JSON.stringify(data, null, 2), "utf-8");
+    console.log(`  数据已保存到 market-data.json`);
+    // 同时保存旧版报告作为备份
+    const report = formatReport(data);
+    writeFileSync(`morning-report-${dateStr}.md`, report, "utf-8");
+    return;
+  }
+
+  if (mode === "--report") {
+    // 从 JSON 读取数据，生成报告（图表已由 Python 生成）
+    console.log("=== 金融市场晨报 v3 [报告生成模式] ===\n");
+    if (!existsSync("market-data.json")) {
+      console.error("未找到 market-data.json，请先运行 --fetch");
+      process.exit(1);
+    }
+    let fundamentals = null;
+    if (existsSync("market-fundamentals.json")) {
+      fundamentals = JSON.parse(readFileSync("market-fundamentals.json", "utf-8"));
+    }
+    const data = JSON.parse(readFileSync("market-data.json", "utf-8"));
+    data.fundamentals = fundamentals;
+    const report = formatReport(data);
+
+    const dateStr = now().slice(0, 10);
+    writeFileSync(`morning-report-${dateStr}.md`, report, "utf-8");
+    console.log(`  已保存到 morning-report-${dateStr}.md`);
+
+    const title = `金融市场晨报 - ${new Date().toLocaleDateString("zh-CN")}`;
+    await sendNotification(title, report);
+    return;
+  }
+
+  // 默认：完整流程
+  console.log("=== 金融市场晨报 v3 ===\n");
+  const data = await fetchAllMarketData();
+  if (existsSync("market-fundamentals.json")) {
+    try { data.fundamentals = JSON.parse(readFileSync("market-fundamentals.json", "utf-8")); } catch {}
+  }
+  const report = formatReport(data);
 
   const dateStr = now().slice(0, 10);
   writeFileSync(`morning-report-${dateStr}.md`, report, "utf-8");
   console.log(`  已保存到 morning-report-${dateStr}.md`);
+
+  writeFileSync("market-data.json", JSON.stringify(data, null, 2), "utf-8");
 
   const title = `金融市场晨报 - ${new Date().toLocaleDateString("zh-CN")}`;
   await sendNotification(title, report);

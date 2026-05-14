@@ -5,18 +5,50 @@ on:
   repository_dispatch:
     types: [morning-report]
 
+permissions:
+  contents: write
+
 jobs:
   report:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Run morning report
-        run: node morning-report.js
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: pip install matplotlib yfinance
+
+      - name: Fetch market data
+        run: node morning-report.js --fetch
         env:
           SENDKEY: ${{ secrets.SENDKEY }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_BASE_URL: ${{ secrets.AI_BASE_URL || 'https://api.deepseek.com/v1' }}
           AI_MODEL: ${{ secrets.AI_MODEL || 'deepseek-chat' }}
+
+      - name: Fetch fundamentals
+        run: python charts/fetch_fundamentals.py
+
+      - name: Generate charts
+        run: python charts/generate_charts.py
+
+      - name: Generate report and push
+        run: node morning-report.js --report
+        env:
+          SENDKEY: ${{ secrets.SENDKEY }}
+          CHART_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/charts
+
+      - name: Commit charts and report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add charts/*.png morning-report-*.md
+          git diff --staged --quiet || git commit -m "晨报: 更新图表和报告 $(date +%Y-%m-%d)"
+          git push
