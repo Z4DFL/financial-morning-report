@@ -701,8 +701,9 @@ function formatReport({
   if (availableCharts.length > 0) {
     md += `\n## 图表\n\n`;
     for (const c of availableCharts) {
-      md += `![${c.label}](${chartBase}/${c.file})\n\n`;
+      md += `- [${c.label}](${chartBase}/${c.file})\n`;
     }
+    md += `\n`;
   }
 
   md += `\n---\n*数据: 新浪财经 + 东方财富 | 更新: ${now.toLocaleTimeString("zh-CN", { hour12: false })}*`;
