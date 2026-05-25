@@ -51,7 +51,7 @@ jobs:
         run: node morning-report.js --report
         env:
           SENDKEY: ${{ secrets.SENDKEY }}
-          CHART_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/charts
+          CHART_BASE_URL: https://cdn.jsdelivr.net/gh/${{ github.repository }}@${{ github.ref_name }}/charts
 
       - name: Commit report
         run: |
