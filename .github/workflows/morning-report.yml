@@ -18,13 +18,6 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python deps
-        run: pip install matplotlib yfinance
-
       - name: Fetch market data
         run: node morning-report.js --fetch
         env:
@@ -33,25 +26,10 @@ jobs:
           AI_BASE_URL: ${{ secrets.AI_BASE_URL || 'https://api.deepseek.com/v1' }}
           AI_MODEL: ${{ secrets.AI_MODEL || 'deepseek-chat' }}
 
-      - name: Fetch fundamentals
-        run: python charts/fetch_fundamentals.py
-
-      - name: Generate charts
-        run: python charts/generate_charts.py
-
-      - name: Commit charts (先提交图表，确保 URL 可用)
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add charts/*.png
-          git diff --staged --quiet || git commit -m "晨报: 更新图表 $(date +%Y-%m-%d)"
-          git push
-
       - name: Generate report and send to WeChat
         run: node morning-report.js --report
         env:
           SENDKEY: ${{ secrets.SENDKEY }}
-          CHART_BASE_URL: https://cdn.jsdelivr.net/gh/${{ github.repository }}@${{ github.ref_name }}/charts
 
       - name: Commit report
         run: |

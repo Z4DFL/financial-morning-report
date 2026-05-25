@@ -1,4 +1,4 @@
-// 金融市场晨报 v3 — 多信源聚合 + AI 总结 + 图表可视化
+// 金融市场晨报 v3 — 多信源聚合 + AI 总结
 // 每天早上 8:30 通过 cron-job.org 触发 → GitHub Action → Server酱 → 微信
 // 数据源: 新浪财经 + 东方财富 + DeepSeek AI
 // 用法: node morning-report.js           → 完整流程（获取数据 + 生成报告 + 推送）
@@ -690,21 +690,6 @@ function formatReport({
     }
   }
 
-  // —— 图表（若已生成）——
-  const chartBase = process.env.CHART_BASE_URL || "charts";
-  const availableCharts = [
-    { file: "index_performance.png", label: "A股指数表现" },
-    { file: "market_breadth.png", label: "市场涨跌分布" },
-    { file: "sector_heatmap.png", label: "板块热力图" },
-  ].filter((c) => { try { return existsSync(`charts/${c.file}`); } catch { return false; } });
-
-  if (availableCharts.length > 0) {
-    md += `\n## 图表\n\n`;
-    for (const c of availableCharts) {
-      md += `- [${c.label}](${chartBase}/${c.file})\n`;
-    }
-    md += `\n`;
-  }
 
   md += `\n---\n*数据: 新浪财经 + 东方财富 | 更新: ${now.toLocaleTimeString("zh-CN", { hour12: false })}*`;
 
@@ -766,7 +751,7 @@ async function main() {
   const mode = process.argv[2] || "";
 
   if (mode === "--fetch") {
-    // 仅获取数据，保存 JSON 供图表脚本使用
+    // 仅获取数据，保存 JSON
     console.log("=== 金融市场晨报 v3 [数据获取模式] ===\n");
     const data = await fetchAllMarketData();
     const dateStr = now().slice(0, 10);
@@ -779,7 +764,7 @@ async function main() {
   }
 
   if (mode === "--report") {
-    // 从 JSON 读取数据，生成报告（图表已由 Python 生成）
+    // 从 JSON 读取数据，生成报告
     console.log("=== 金融市场晨报 v3 [报告生成模式] ===\n");
     if (!existsSync("market-data.json")) {
       console.error("未找到 market-data.json，请先运行 --fetch");
