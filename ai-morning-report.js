@@ -383,10 +383,10 @@ function formatReport({ events, byCat, total }, nowDate) {
 // 推送
 // ═══════════════════════════════════════════════════════════════
 
-async function sendNotification(title, content) {
+async function sendRaw(title, desp) {
   if (!SENDKEY) throw new Error("未配置 SENDKEY，无法推送");
   const url = `https://sctapi.ftqq.com/${SENDKEY}.send`;
-  const body = new URLSearchParams({ title, desp: content });
+  const body = new URLSearchParams({ title, desp });
   const res = await fetchWithRetry(url, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -394,7 +394,34 @@ async function sendNotification(title, content) {
   });
   const result = await res.json();
   if (result.code !== 0) throw new Error(`Server酱返回: ${JSON.stringify(result)}`);
+  return result;
+}
+
+async function sendNotification(title, content) {
+  await sendRaw(title, content);
   console.log("晨报已发送到微信");
+}
+
+// 失败兜底：脚本任何环节出错，用同一个 server 酱通道推一条告警
+async function notifyFailure(err) {
+  console.error("脚本执行失败:", err.message);
+  if (!SENDKEY) {
+    console.error("（未配置 SENDKEY，无法发送失败告警）");
+    return;
+  }
+  const now = new Date();
+  const when = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: TZ, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(now);
+  try {
+    await sendRaw(
+      `⚠️ AI 晨报生成失败 - ${when}`,
+      `**执行出错**：${err.message}\n\n时间：${when}\n\n[查看 Actions 日志](https://github.com/Z4DFL/financial-morning-report/actions)`,
+    );
+    console.log("失败告警已发送");
+  } catch (e) {
+    console.error("失败告警发送失败:", e.message);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -411,11 +438,16 @@ async function main() {
   const mode = process.argv[2] || "";
   const now = new Date();
 
+  if (mode === "--test-alert") {
+    await sendRaw("AI 晨报告警通道测试", "这是一条测试告警：如果你收到它，说明失败兜底通道可用。");
+    console.log("告警通道测试已发送");
+    return;
+  }
+
   let payload;
   if (mode === "--report") {
     if (!existsSync("ai-data.json")) {
-      console.error("未找到 ai-data.json，请先运行 --fetch");
-      process.exit(1);
+      throw new Error("未找到 ai-data.json，请先运行 --fetch");
     }
     payload = JSON.parse(readFileSync("ai-data.json", "utf-8"));
     console.log("[报告生成模式] 读取 ai-data.json");
@@ -423,8 +455,7 @@ async function main() {
     console.log("=== AI 行业晨报 v1 ===\n");
     const items = await collect();
     if (!items.length) {
-      console.error("未采集到任何 AI 相关新闻，终止");
-      process.exit(1);
+      throw new Error("未采集到任何 AI 相关新闻（可能是信源全部不可用）");
     }
     const picked = select(items);
     payload = { items, ...picked, generatedAt: now.toISOString() };
@@ -445,7 +476,7 @@ async function main() {
   await sendNotification(`AI 行业晨报 - ${new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, month: "long", day: "numeric" }).format(now)}`, report);
 }
 
-main().catch((err) => {
-  console.error("脚本执行失败:", err.message);
+main().catch(async (err) => {
+  await notifyFailure(err);
   process.exit(1);
 });
