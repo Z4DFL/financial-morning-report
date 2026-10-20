@@ -7,7 +7,7 @@
 
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 
-const SENDKEY = process.env.SENDKEY || "SCT346359T1ErBbbcPAUM5AZo4fy2pXSpa";
+const SENDKEY = process.env.SENDKEY || ""; // 只从环境变量读取，不要在代码里写死
 const AI_API_KEY = process.env.AI_API_KEY || "";      // DeepSeek / OpenAI 兼容 key
 const AI_BASE_URL = process.env.AI_BASE_URL || "https://api.deepseek.com/v1";
 const AI_MODEL = process.env.AI_MODEL || "deepseek-chat";
@@ -701,6 +701,7 @@ function formatReport({
 // ═══════════════════════════════════════════════════════════════
 
 async function sendNotification(title, content) {
+  if (!SENDKEY) throw new Error("未配置 SENDKEY，无法推送");
   const url = `https://sctapi.ftqq.com/${SENDKEY}.send`;
   const body = new URLSearchParams({ title, desp: content });
   const res = await fetchWithRetry(url, {
