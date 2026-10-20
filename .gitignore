@@ -3,4 +3,6 @@ node_modules/
 morning-report-*.md
 market-data.json
 market-fundamentals.json
+ai-morning-report-*.md
+ai-data.json
 dist/
