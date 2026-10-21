@@ -337,7 +337,10 @@ async function collect() {
       continue;
     }
     st.clean++;
-    filtered.push({ ...x, intro: cleanIntro(x.intro), score: scoreItem(x, now), category: classify(x) });
+    const rawIntro = String(x.intro || "");
+    // 上交所/上证报的稿件以“◎记者 姓名姓名正文”开头，名字之间没有分隔，清洗容易误伤，直接不展示导语
+    const intro = /^[◎●]\s*记者/.test(rawIntro) ? "" : cleanIntro(rawIntro);
+    filtered.push({ ...x, intro, score: scoreItem(x, now), category: classify(x) });
   }
   const unique = dedupe(filtered.sort((a, b) => b.score - a.score));
   console.log(`  原始 ${st.total} → AI相关 ${st.ai} → 48h内 ${st.fresh} → 质量过滤 ${st.clean} → 去重 ${unique.length}`);
@@ -418,7 +421,7 @@ async function aiEnhance(events, byCat) {
     .map((it, i) => `${i + 1}. [${it.source}] ${it.title}${it.intro ? ` ／ ${clip(it.intro, 70)}` : ""}`)
     .join("\n");
 
-  const prompt = `你是中文 AI 行业媒体的资深编辑，读者是证券从业者。
+  const prompt = `你是中文 AI 行业媒体的资深编辑，读者是证券从业者。今天是 ${new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, year: "numeric", month: "long", day: "numeric" }).format(new Date())}。
 下面是今天筛出的 ${ordered.length} 条 AI 新闻（编号、来源、标题、摘要）：
 
 ${list}
@@ -430,9 +433,9 @@ ${list}
 1. keywords 给 3 个，概括今天 AI 圈的主线（如“算力阵营松动”“资本退潮”）；
 2. overview 说清今天最重要的三条主线并给判断，不要复述标题；
 3. impacts 必须覆盖 1 到 ${ordered.length} 每一条，不得遗漏；
-4. impact 要具体（公司、环节、金额、后续看什么），不要“值得关注”“意义重大”这类空话；
+4. impact 不超过 60 字，要具体（公司、环节、金额、后续看什么），不要“值得关注”“意义重大”这类空话；
 5. 赛事、软文、纯观点稿，impact 写“参考价值有限”；
-6. 摘要中的数字若与常识明显不符，impact 以“⚠️ 存疑：”开头说明。`;
+6. 摘要中的数字若与今天这个日期或常识明显矛盾，impact 以“⚠️ 存疑：”开头说明。`;
 
   try {
     const res = await fetchWithRetry(`${AI_BASE_URL}/chat/completions`, {
