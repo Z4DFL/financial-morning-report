@@ -9,6 +9,9 @@
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 
 const SENDKEY = process.env.SENDKEY || "";
+const AI_API_KEY = process.env.AI_API_KEY || "";
+const AI_BASE_URL = (process.env.AI_BASE_URL || "https://api.deepseek.com/v1").replace(/\/+$/, "");
+const AI_MODEL = process.env.AI_MODEL || "deepseek-chat";
 const TZ = "Asia/Shanghai";
 
 // ═══════════════════════════════════════════════════════════════
@@ -195,6 +198,10 @@ function cleanIntro(s) {
     .replace(/^每经AI快讯\s*[，,]?\s*/, "")
     .replace(/^财联社\s*\d+\s*月\s*\d+\s*日讯\s*[（(][^）)]*[）)]\s*/, "")
     .replace(/作者\s*[丨|｜][\s\S]{0,30}?编辑\s*[丨|｜][\s\S]{0,8}?(?=[，。]|最近|日前|近日|昨天|今日|随着)/, "")
+    .replace(/[（(]IT之家注[：:][\s\S]*?[）)]/g, "")
+    .replace(/[（(]现汇率约合[\s\S]*?[）)]/g, "")
+    .replace(/[（(]约合[\s\S]{0,20}?元人民币[）)]/g, "")
+    .replace(/^[◎●]\s*记者\s*(?:[^\s，。]{2,4}\s*){1,2}[，,]?\s*/, "")
     .replace(/#?欢迎关注[^#]*$/g, "")
     .replace(/更多精彩内容[^#]*$/g, "")
     .replace(/[（(]微信号[：:][^）)]*[）)]/g, "")
@@ -273,14 +280,47 @@ function classify(it) {
   return "其他动态";
 }
 
+// 早报/合集：把标题里的各条拆成独立条目，避免一条顶十条
+function splitRoundupTitle(x) {
+  const m = x.title.match(/^[【\[][^】\]]{2,10}[】\]]\s*([\s\S]*)$/);
+  const body = m ? m[1] : x.title;
+  return body
+    .split(/[；;]/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 10)
+    .map((s) => ({
+      ...x,
+      title: s.replace(/^[0-9]+[.、]\s*/, "").replace(/[。；;]$/, ""),
+      fromRoundup: true,
+      weight: Math.max(1, x.weight - 1),
+    }));
+}
+
+function expandRoundups(items) {
+  const out = [];
+  const briefs = [];
+  for (const x of items) {
+    if (!ROUNDUP.test(x.title)) {
+      out.push(x);
+      continue;
+    }
+    const parts = splitRoundupTitle(x);
+    if (parts.length >= 2) out.push(...parts);
+    briefs.push(x);
+  }
+  return { items: out, briefs: briefs.slice(0, 2) };
+}
+
 async function collect() {
   console.log("[1/3] 抓取信源...");
   const [sina, ...rss] = await Promise.all([
     fetchSinaTech(),
     ...RSS_SOURCES.map((cfg) => fetchRss(cfg)),
   ]);
-  const all = [...sina, ...rss.flat()];
-  console.log(`  原始条目: ${all.length}（新浪 ${sina.length} / RSS ${all.length - sina.length}）`);
+  const raw = [...sina, ...rss.flat()];
+  const { items: expanded, briefs } = expandRoundups(raw);
+  const all = expanded;
+  console.log(`  原始条目: ${raw.length}（新浪 ${sina.length} / RSS ${raw.length - sina.length} ；合集拆条后 ${all.length}）`);
 
   const now = Date.now();
   const st = { total: all.length, ai: 0, fresh: 0, clean: 0 };
@@ -301,16 +341,16 @@ async function collect() {
   }
   const unique = dedupe(filtered.sort((a, b) => b.score - a.score));
   console.log(`  原始 ${st.total} → AI相关 ${st.ai} → 48h内 ${st.fresh} → 质量过滤 ${st.clean} → 去重 ${unique.length}`);
-  return unique;
+  return { items: unique, briefs };
 }
 
 // ═══════════════════════════════════════════════════════════════
 // 选稿：大事件 + 分类要闻
 // ═══════════════════════════════════════════════════════════════
 
-const MAX_EVENTS = 5;
+const MAX_EVENTS = 3;
 const MAX_PER_CATEGORY = 4;
-const MAX_TOTAL = 18;
+const MAX_TOTAL = 20;
 
 function select(items) {
   const sorted = [...items].sort((a, b) => b.score - a.score || b.time - a.time);
@@ -355,24 +395,123 @@ function oneLine(it) {
   return `**${it.title}** — ${it.source} · ${fmtTime(it.time)}\n   ${intro ? `> ${intro}\n   ` : ""}[原文](${it.url})`;
 }
 
-function formatReport({ events, byCat, total }, nowDate) {
-  let md = `# AI 行业晨报\n\n**${fmtDate(nowDate)}**\n\n`;
+// —— 兜底：AI 不可用时的“影响”模板句 ——
+function fallbackImpact(it) {
+  const t = it.title;
+  if (/(收购|并购|融资|IPO|上市|估值|亿美元|亿元)/.test(t)) return "资本动作，关注交易对价与后续整合。";
+  if (/(政策|监管|草案|备案|标准|禁令|法案)/.test(t)) return "政策信号，关注落地口径与时间表。";
+  if (/(开源|发布|推出|上线|量产|交付|突破)/.test(t)) return "产品与技术进展，关注落地节奏。";
+  return "";
+}
 
-  const counts = Object.entries(byCat).map(([k, v]) => `${k} ${v.length}`).join(" · ");
-  md += `本期共 ${total} 条 | 大事件 ${events.length} 条${counts ? " | " + counts : ""}\n\n`;
+// —— AI 编辑层：关键词、综述、逐条“影响” ——
+async function aiEnhance(events, byCat) {
+  if (!AI_API_KEY) {
+    console.log("  未配置 AI_API_KEY，使用模板句兜底");
+    return null;
+  }
+
+  const ordered = [...events, ...CATEGORIES.flatMap((c) => byCat[c.name] || [])];
+  if (!ordered.length) return null;
+
+  const list = ordered
+    .map((it, i) => `${i + 1}. [${it.source}] ${it.title}${it.intro ? ` ／ ${clip(it.intro, 70)}` : ""}`)
+    .join("\n");
+
+  const prompt = `你是中文 AI 行业媒体的资深编辑，读者是证券从业者。
+下面是今天筛出的 ${ordered.length} 条 AI 新闻（编号、来源、标题、摘要）：
+
+${list}
+
+请只输出一个 JSON 对象（不要 markdown 代码块，不要任何解释），格式：
+{"keywords":["不超过6字","...","..."],"overview":"100-140字","impacts":[{"id":1,"impact":"20-40字"}]}
+
+要求：
+1. keywords 给 3 个，概括今天 AI 圈的主线（如“算力阵营松动”“资本退潮”）；
+2. overview 说清今天最重要的三条主线并给判断，不要复述标题；
+3. impacts 必须覆盖 1 到 ${ordered.length} 每一条，不得遗漏；
+4. impact 要具体（公司、环节、金额、后续看什么），不要“值得关注”“意义重大”这类空话；
+5. 赛事、软文、纯观点稿，impact 写“参考价值有限”；
+6. 摘要中的数字若与常识明显不符，impact 以“⚠️ 存疑：”开头说明。`;
+
+  try {
+    const res = await fetchWithRetry(`${AI_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${AI_API_KEY}` },
+      body: JSON.stringify({
+        model: AI_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.4,
+        max_tokens: 2000,
+        response_format: { type: "json_object" },
+      }),
+    });
+    const json = await res.json();
+    const text = json?.choices?.[0]?.message?.content || "";
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start < 0 || end <= start) throw new Error("返回内容不是 JSON");
+    const parsed = JSON.parse(text.slice(start, end + 1));
+
+    const impacts = new Map();
+    for (const entry of parsed?.impacts ?? []) {
+      const id = Number(entry?.id);
+      if (Number.isFinite(id)) impacts.set(id, String(entry.impact || "").trim());
+    }
+    ordered.forEach((it, i) => {
+      it.impact = impacts.get(i + 1) || fallbackImpact(it);
+    });
+
+    console.log(`  AI 编辑: 关键词 ${(parsed?.keywords ?? []).length} 个 / 影响 ${impacts.size} 条`);
+    return {
+      keywords: (parsed?.keywords ?? []).filter(Boolean).slice(0, 3).map((k) => String(k).slice(0, 12)),
+      overview: String(parsed?.overview || "").trim(),
+    };
+  } catch (e) {
+    console.log("  AI 编辑失败，改用模板句:", e.message);
+    ordered.forEach((it) => {
+      if (!it.impact) it.impact = fallbackImpact(it);
+    });
+    return null;
+  }
+}
+
+function eventBlock(it, i) {
+  const lines = [`**${i + 1}｜${it.title}**`];
+  if (it.intro) lines.push(`事件：${clip(it.intro, 90)}`);
+  if (it.impact) lines.push(`影响：${it.impact}`);
+  lines.push(`来源：[${it.source} ${fmtTime(it.time)}](${it.url})`);
+  return lines.join("\n");
+}
+
+function briefBlock(it) {
+  const head = it.title ? `**${clip(it.title, 40)}**` : "";
+  return `- ${head}——${clip(it.intro, 60) || "见原文"}\n  [${it.source} ${fmtTime(it.time)}](${it.url})`;
+}
+
+function formatReport({ events, byCat, total, brief, ai }, nowDate) {
+  let md = `# AI 行业晨报\n\n**${fmtDate(nowDate)}** · 共 ${total} 条\n\n`;
+
+  if (ai?.overview) md += `> **今日看点**\n> ${ai.overview}\n\n`;
+  if (ai?.keywords?.length) md += `关键词：${ai.keywords.join(" · ")}\n\n`;
 
   if (events.length) {
     md += `## 今日大事件\n\n`;
-    events.forEach((it, i) => {
-      md += `${i + 1}. ${oneLine(it)}\n\n`;
-    });
+    md += events.map((it, i) => eventBlock(it, i)).join("\n\n") + "\n\n";
   }
 
   for (const c of CATEGORIES) {
     const list = byCat[c.name];
     if (!list || !list.length) continue;
     md += `## ${c.name}\n\n`;
-    for (const it of list) md += `- ${oneLine(it)}\n\n`;
+    for (const it of list) {
+      md += `- **${it.title}**${it.impact ? `——${it.impact}` : ""}\n  [${it.source} ${fmtTime(it.time)}](${it.url})\n\n`;
+    }
+  }
+
+  if (brief?.length) {
+    md += `## 行业简报\n\n`;
+    for (const it of brief) md += briefBlock(it) + "\n\n";
   }
 
   md += `\n---\n*信源: ${["新浪科技", ...RSS_SOURCES.map((s) => s.name)].join(" · ")} | 生成于 ${new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false }).format(nowDate)}*`;
@@ -453,20 +592,30 @@ async function main() {
     console.log("[报告生成模式] 读取 ai-data.json");
   } else {
     console.log("=== AI 行业晨报 v1 ===\n");
-    const items = await collect();
+    const { items, briefs } = await collect();
     if (!items.length) {
       throw new Error("未采集到任何 AI 相关新闻（可能是信源全部不可用）");
     }
     const picked = select(items);
-    payload = { items, ...picked, generatedAt: now.toISOString() };
-    writeFileSync("ai-data.json", JSON.stringify(payload, null, 2), "utf-8");
     console.log(`[2/3] 选稿: 大事件 ${picked.events.length} 条 / 分类 ${Object.keys(picked.byCat).length} 组 / 共 ${picked.total} 条`);
+
+    console.log("[3/3] AI 编辑...");
+    const ai = await aiEnhance(picked.events, picked.byCat);
+    if (!ai) {
+      picked.events.forEach((it) => { if (!it.impact) it.impact = fallbackImpact(it); });
+      for (const list of Object.values(picked.byCat)) {
+        list.forEach((it) => { if (!it.impact) it.impact = fallbackImpact(it); });
+      }
+    }
+
+    payload = { items, briefs, ...picked, ai, generatedAt: now.toISOString() };
+    writeFileSync("ai-data.json", JSON.stringify(payload, null, 2), "utf-8");
   }
 
   const report = formatReport(payload, now);
   const file = `ai-morning-report-${todayStr(now)}.md`;
   writeFileSync(file, report, "utf-8");
-  console.log(`[3/3] 已保存 ${file}（${report.length} 字）`);
+  console.log(`[4/4] 已保存 ${file}（${report.length} 字）`);
 
   if (mode === "--dry" || mode === "--fetch") {
     console.log("（未推送）");
